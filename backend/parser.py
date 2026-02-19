@@ -3,20 +3,20 @@ from typing import List, Dict, Any
 from models import TimelineEvent, Participant, RTPStat
 
 # ── Core regex patterns ──────────────────────────────────────────────────────
-TS_RE      = re.compile(r'(\d{4}-\d{2}-\d{2}_\d{2}:\d{2}:\d{2}\.\d+)')
-MODULE_RE  = re.compile(r'<([^>]+)>')
-FROM_RE    = re.compile(r'[Ff]rom:\s*<?(?:sip:|tel:)?\+?(\d+)', re.MULTILINE)
-TO_RE      = re.compile(r'[Tt]o:\s*<?(?:sip:|tel:)?\+?(\d+)',   re.MULTILINE)
-UA_RE      = re.compile(r'[Uu]ser-[Aa]gent:\s*([^\r\n,;]+)',     re.MULTILINE)
-REASON_RE  = re.compile(r'[Rr]eason:\s*([^\r\n]+)',               re.MULTILINE)
-RTP_RE     = re.compile(
+TS_RE         = re.compile(r'(\d{4}-\d{2}-\d{2}_\d{2}:\d{2}:\d{2}\.\d+)')
+MODULE_RE     = re.compile(r'<([^>]+)>')
+FROM_RE       = re.compile(r'[Ff]rom:\s*<?(?:sip:|tel:)?\+?(\d+)', re.MULTILINE)
+TO_RE         = re.compile(r'[Tt]o:\s*<?(?:sip:|tel:)?\+?(\d+)',   re.MULTILINE)
+UA_RE         = re.compile(r'[Uu]ser-[Aa]gent:\s*([^\r\n,;]+)',     re.MULTILINE)
+REASON_RE     = re.compile(r'[Rr]eason:\s*([^\r\n]+)',               re.MULTILINE)
+RTP_RE        = re.compile(
     r'P-RTP-Stat:\s*PS=?(\d+),OS=?(\d+),PR=?(\d+),OR=?(\d+),PL=?(\d+),PD=?(\d+),JI=?(\d+)',
     re.IGNORECASE
 )
 CONTACT_IP_RE = re.compile(r'[Cc]ontact:\s*<?sip:[^@]+@([\d.]+):?(\d*)', re.MULTILINE)
-PAI_RE     = re.compile(r'[Pp]-[Aa]sserted-[Ii]dentity:\s*<?(?:sip:|tel:)?\+?(\d+)', re.MULTILINE)
-SIP_METHODS = ['INVITE','BYE','CANCEL','REGISTER','PRACK','ACK',
-               'NOTIFY','OPTIONS','UPDATE','INFO','MESSAGE','SUBSCRIBE']
+PAI_RE        = re.compile(r'[Pp]-[Aa]sserted-[Ii]dentity:\s*<?(?:sip:|tel:)?\+?(\d+)', re.MULTILINE)
+SIP_METHODS   = ['INVITE','BYE','CANCEL','REGISTER','PRACK','ACK',
+                 'NOTIFY','OPTIONS','UPDATE','INFO','MESSAGE','SUBSCRIBE']
 
 # ── Block splitter ───────────────────────────────────────────────────────────
 BLOCK_RE = re.compile(
@@ -53,15 +53,25 @@ def _first_line(body: str) -> str:
     return ''
 
 def _direction(body: str) -> str:
-    first120 = body[:200]
-    if 'sending' in first120: return 'OUT'
-    if 'received' in first120: return 'IN'
+    first200 = body[:200]
+    if 'sending' in first200: return 'OUT'
+    if 'received' in first200: return 'IN'
     return '→'
+
+def _normalize_number(num: str) -> str:
+    """Normalize phone numbers to E.164 format without leading +."""
+    num = num.lstrip('0')
+    # If 9 digits and no country code, assume Swiss (+41)
+    if len(num) == 9:
+        num = '41' + num
+    return num
 
 def _parse_timeline(blocks) -> List[TimelineEvent]:
     events = []
     for ts, module, body in blocks:
         first = _first_line(body)
+
+        # Determine method
         method = None
         for m in SIP_METHODS:
             if re.match(rf'^{m}\s+', first):
@@ -74,6 +84,7 @@ def _parse_timeline(blocks) -> List[TimelineEvent]:
         if method is None:
             method = 'INTERNAL'
 
+        # Build description
         to_m   = TO_RE.search(body)
         from_m = FROM_RE.search(body)
         desc_parts = []
@@ -106,45 +117,65 @@ def _parse_participants(blocks, log: str) -> List[Participant]:
         to_m      = TO_RE.search(body)
         pai_m     = PAI_RE.search(body)
 
-        ua  = ua_m.group(1).strip()      if ua_m      else None
-        ip  = contact_m.group(1).strip() if contact_m else None
+        ua_raw = ua_m.group(1).strip() if ua_m else None
+        ip     = contact_m.group(1).strip() if contact_m else None
 
-        # Skip YATE user-agent — it's the proxy not an endpoint
-        if ua and 'YATE' in ua:
-            ua = None
+        # Skip YATE — it's the proxy, not an endpoint
+        ua = None if (ua_raw and 'YATE' in ua_raw) else ua_raw
 
         for num_m in [from_m, to_m, pai_m]:
             if not num_m: continue
             num = num_m.group(1)
             if len(num) < 7: continue
-            # Skip IMSI-style numbers for participant detection
+            # Skip IMSI-style long numbers
             if len(num) > 15: continue
-            if num not in seen:
-                seen[num] = {'number': f"+{num}", 'device': ua, 'ip': ip, 'role': 'Unknown'}
+            norm = _normalize_number(num)
+            if norm not in seen:
+                seen[norm] = {
+                    'number': f"+{norm}",
+                    'device': ua,
+                    'ip':     ip,
+                    'role':   'Unknown'
+                }
             else:
-                if ua and not seen[num]['device']: seen[num]['device'] = ua
-                if ip and not seen[num]['ip']:     seen[num]['ip']     = ip
+                if ua and not seen[norm]['device']: seen[norm]['device'] = ua
+                if ip and not seen[norm]['ip']:     seen[norm]['ip']     = ip
 
     return [Participant(**p) for p in seen.values()]
 
 def _parse_rtp(blocks, log: str) -> List[RTPStat]:
     stats = []
     seen  = set()
-    codec_m = re.search(r'Formats?\s+(?:for\s+\S+\s+)?changed\s+to\s+[\'"]?(\S+)[\'"]?', log)
-    codec = codec_m.group(1) if codec_m else None
+
+    # Extract codec — strip trailing quotes/spaces
+    codec_m = re.search(
+        r'[Ff]ormats?\s+(?:for\s+\S+\s+)?changed\s+to\s+[\'"]?([^\s\'"]+)[\'"]?',
+        log
+    )
+    codec = codec_m.group(1).strip("' ") if codec_m else None
 
     for ts, module, body in blocks:
         for m in RTP_RE.finditer(body):
+            # Deduplicate by stats values
             key = (m.group(1), m.group(2), m.group(3), m.group(4))
             if key in seen: continue
             seen.add(key)
+
+            # Determine leg from From header, normalize number
             from_m = FROM_RE.search(body)
-            leg = f"+{from_m.group(1)}" if from_m else "unknown"
+            if from_m:
+                leg = f"+{_normalize_number(from_m.group(1))}"
+            else:
+                leg = "unknown"
+
             stats.append(RTPStat(
                 leg=leg,
-                ps=m.group(1), os=m.group(2),
-                pr=m.group(3), or_=m.group(4),
-                pl=m.group(5), pd=m.group(6),
+                ps=m.group(1),
+                os=m.group(2),
+                pr=m.group(3),
+                or_=m.group(4),
+                pl=m.group(5),
+                pd=m.group(6),
                 ji=m.group(7),
                 codec=codec
             ))
@@ -183,7 +214,9 @@ def _parse_pgw(log: str) -> List[str]:
     events = []
     pgw_re = re.compile(
         r'(\d{4}-\d{2}-\d{2}_\d{2}:\d{2}:\d{2}\.\d+).*?'
-        r'pgw/session/(create|delete).*?pgw_session["\s:]+([^,"}\s]+)', re.DOTALL)
+        r'pgw/session/(create|delete).*?pgw_session["\s:]+([^,"}\s]+)',
+        re.DOTALL
+    )
     for m in pgw_re.finditer(log):
         events.append(f"[{m.group(1)}] PGW session {m.group(2).upper()}: {m.group(3)}")
     return events
@@ -192,13 +225,14 @@ def _parse_sdp(blocks) -> Dict[str, Any]:
     offered, answered = [], []
     for ts, module, body in blocks:
         if 'v=0' not in body: continue
-        ua_m = UA_RE.search(body)
-        ua   = ua_m.group(1).strip() if ua_m else 'unknown'
+        ua_m   = UA_RE.search(body)
+        ua_raw = ua_m.group(1).strip() if ua_m else 'unknown'
+        # Label YATE proxy blocks clearly
+        ua     = 'IMS Core (YATE)' if ua_raw and 'YATE' in ua_raw else ua_raw
         codecs = re.findall(r'a=rtpmap:\d+\s+([^\r\n/]+)', body)
         entry  = {'ua': ua, 'codecs': list(dict.fromkeys(codecs))}
-        first = _first_line(body)
-        if first.startswith('INVITE') or \
-           re.match(r'^SIP/2\.0 18[03]', first):
+        first  = _first_line(body)
+        if first.startswith('INVITE') or re.match(r'^SIP/2\.0 18[03]', first):
             offered.append(entry)
         elif re.match(r'^SIP/2\.0 200', first):
             answered.append(entry)
