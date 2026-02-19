@@ -10,7 +10,7 @@ class AnalyzeRequest(BaseModel):
     flags: Optional[List[str]] = []
 
 class Participant(BaseModel):
-    role: str
+    role: Optional[str] = "Unknown"
     number: Optional[str] = None
     imsi: Optional[str] = None
     device: Optional[str] = None
