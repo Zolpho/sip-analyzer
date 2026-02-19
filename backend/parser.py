@@ -88,8 +88,12 @@ def _parse_timeline(blocks) -> List[TimelineEvent]:
         to_m   = TO_RE.search(body)
         from_m = FROM_RE.search(body)
         desc_parts = []
-        if from_m: desc_parts.append(f"From: +{from_m.group(1)}")
-        if to_m:   desc_parts.append(f"To: +{to_m.group(1)}")
+        if from_m:
+            fn = from_m.group(1)
+            desc_parts.append(f"From: {fn}" if len(fn) >= 15 else f"From: +{fn}")
+        if to_m:
+            tn = to_m.group(1)
+            desc_parts.append(f"To: {tn}" if len(tn) >= 15 else f"To: +{tn}")
         cid = re.search(r'[Cc]all-[Ii][Dd]:\s*(\S+)', body)
         if cid: desc_parts.append(f"Call-ID: {cid.group(1)[:30]}")
         desc = " | ".join(desc_parts) if desc_parts else first[:120]
