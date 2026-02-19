@@ -1,178 +1,212 @@
 import re
-from typing import List, Tuple, Optional
+from typing import List, Dict, Any
 from models import TimelineEvent, Participant, RTPStat
 
-SIP_METHODS = ["INVITE","ACK","BYE","CANCEL","REGISTER","OPTIONS",
-               "UPDATE","PRACK","INFO","MESSAGE","SUBSCRIBE","NOTIFY","REFER"]
+# ── Core regex patterns ──────────────────────────────────────────────────────
+TS_RE      = re.compile(r'(\d{4}-\d{2}-\d{2}_\d{2}:\d{2}:\d{2}\.\d+)')
+MODULE_RE  = re.compile(r'<([^>]+)>')
+FROM_RE    = re.compile(r'[Ff]rom:\s*<?(?:sip:|tel:)?\+?(\d+)', re.MULTILINE)
+TO_RE      = re.compile(r'[Tt]o:\s*<?(?:sip:|tel:)?\+?(\d+)',   re.MULTILINE)
+UA_RE      = re.compile(r'[Uu]ser-[Aa]gent:\s*([^\r\n,;]+)',     re.MULTILINE)
+REASON_RE  = re.compile(r'[Rr]eason:\s*([^\r\n]+)',               re.MULTILINE)
+RTP_RE     = re.compile(
+    r'P-RTP-Stat:\s*PS=?(\d+),OS=?(\d+),PR=?(\d+),OR=?(\d+),PL=?(\d+),PD=?(\d+),JI=?(\d+)',
+    re.IGNORECASE
+)
+CONTACT_IP_RE = re.compile(r'[Cc]ontact:\s*<?sip:[^@]+@([\d.]+):?(\d*)', re.MULTILINE)
+PAI_RE     = re.compile(r'[Pp]-[Aa]sserted-[Ii]dentity:\s*<?(?:sip:|tel:)?\+?(\d+)', re.MULTILINE)
+SIP_METHODS = ['INVITE','BYE','CANCEL','REGISTER','PRACK','ACK',
+               'NOTIFY','OPTIONS','UPDATE','INFO','MESSAGE','SUBSCRIBE']
 
-METHOD_RE   = re.compile(r"^(" + "|".join(SIP_METHODS) + r")\s+\S+\s+SIP/2\.0")
-STATUS_RE   = re.compile(r"^SIP/2\.0\s+(\d{3})\s+(.+)")
-UA_RE       = re.compile(r"^User-Agent:\s*(.+)$", re.MULTILINE)
-CONTACT_IP  = re.compile(r"^Contact:\s*<sip:[^@]+@([\d\.]+):\d+", re.MULTILINE)
-FROM_RE     = re.compile(r"^From:\s*<(?:sip:|tel:)\+?(\d+)[@;>]", re.MULTILINE)
-TO_RE       = re.compile(r"^To:\s*<(?:sip:|tel:)\+?(\d+)[@;>]", re.MULTILINE)
-RTP_STAT_RE = re.compile(r"P-RTP-Stat:\s*PS=(\d+),OS=(\d+),PR=(\d+),OR=(\d+),PL=(\d+),PD=(\d+),JI=(\d+)")
-CODEC_RE    = re.compile(r"Formats for '(\w+)' changed to '([^']+)'")
-REASON_RE   = re.compile(r"^Reason:\s*(.+)$", re.MULTILINE)
-PGW_URL_RE  = re.compile(r"url=http://[^;]+pgw/session/(\w+)[^;]*;body=(\{[^}]+\})")
-SSRC_RE     = re.compile(r"RTCP Received SSRC (\w+) but expecting (\w+)")
-WARN_RE     = re.compile(r'Warning:\s*\d+\s+\S+\s+"([^"]+)"')
-TRANSPORT_RE= re.compile(r"Transport\((\S+)\)")
-SESSION_RE  = re.compile(r"Session '([^']+)'")
+# ── Block splitter ───────────────────────────────────────────────────────────
+BLOCK_RE = re.compile(
+    r'(\d{4}-\d{2}-\d{2}_\d{2}:\d{2}:\d{2}\.\d+)\s+<([^>]+)>[^\n]*\n'
+    r'(?:-----\n)?(.*?)(?=\d{4}-\d{2}-\d{2}_\d{2}:\d{2}:\d{2}\.\d+\s+<|\Z)',
+    re.DOTALL
+)
 
-
-def split_blocks(raw: str):
-    """Split raw log into (timestamp, module, body) tuples."""
+def _extract_blocks(log: str):
+    """Split log into (timestamp, module, body) tuples."""
     blocks = []
-    current_ts = current_module = None
-    current_lines = []
-    line_re = re.compile(r"^(\d{4}-\d{2}-\d{2}_\d{2}:\d{2}:\d{2}\.\d+)\s+<([^>]+)>\s+(.*)")
-    for line in raw.splitlines():
-        m = line_re.match(line)
-        if m:
-            if current_ts is not None:
-                blocks.append((current_ts, current_module, "\n".join(current_lines)))
-            current_ts, current_module = m.group(1), m.group(2)
-            current_lines = [m.group(3)]
-        else:
-            current_lines.append(line)
-    if current_ts is not None:
-        blocks.append((current_ts, current_module, "\n".join(current_lines)))
+    # Normalise compressed grep output — insert newlines before SIP headers
+    log = re.sub(r'((?:Via|From|To|Call-ID|CSeq|Contact|User-Agent|'
+                 r'P-RTP-Stat|P-Asserted-Identity|Allow|Content-Length|'
+                 r'Reason|Route|Supported|Require):\s)', r'\n\1', log)
+    for m in BLOCK_RE.finditer(log):
+        ts, module, body = m.group(1), m.group(2), m.group(3).strip()
+        if body:
+            blocks.append((ts, module, body))
     return blocks
 
+def _first_line(body: str) -> str:
+    for line in body.splitlines():
+        line = line.strip()
+        if line and not line.startswith('-----'):
+            return line
+    return ''
 
-def extract_method(body: str) -> Optional[str]:
-    first = body.strip().splitlines()[0].strip() if body.strip() else ""
-    if METHOD_RE.match(first):
-        return first.split()[0]
-    s = STATUS_RE.match(first)
-    if s:
-        return f"{s.group(1)} {s.group(2)}"
-    return None
+def _direction(module: str, body: str) -> str:
+    if 'sending' in body[:120] or 'sending' in module:
+        return 'OUT'
+    if 'received' in body[:120]:
+        return 'IN'
+    return '→'
 
+def _parse_timeline(blocks) -> List[TimelineEvent]:
+    events = []
+    for ts, module, body in blocks:
+        first = _first_line(body)
 
-def direction(body: str) -> str:
-    if "sending" in body[:80]:
-        return "OUT"
-    if "received" in body[:80]:
-        return "IN"
-    return "INTERNAL"
+        # Determine method
+        method = None
+        for m in SIP_METHODS:
+            if re.match(rf'^{m}\s+', first):
+                method = m
+                break
+        if method is None:
+            m2 = re.match(r'^SIP/2\.0\s+(\d{3})\s+(.+)$', first)
+            if m2:
+                method = f"{m2.group(1)} {m2.group(2)[:30]}"
+        if method is None:
+            # Internal log line
+            method = 'INTERNAL'
 
+        # Description
+        if method == 'INTERNAL':
+            desc = first[:120] if first else body[:120]
+        else:
+            to_m   = TO_RE.search(body)
+            from_m = FROM_RE.search(body)
+            desc_parts = []
+            if from_m: desc_parts.append(f"From: +{from_m.group(1)}")
+            if to_m:   desc_parts.append(f"To: +{to_m.group(1)}")
+            cid = re.search(r'[Cc]all-[Ii][Dd]:\s*(\S+)', body)
+            if cid: desc_parts.append(f"Call-ID: {cid.group(1)[:30]}")
+            desc = " | ".join(desc_parts) if desc_parts else first[:120]
 
-def parse_log(raw: str) -> dict:
-    blocks = split_blocks(raw)
-    timeline: List[TimelineEvent] = []
-    participants: List[Participant] = []
-    rtp_stats: List[RTPStat] = []
-    anomalies: List[str] = []
-    pgw_events: List[str] = []
-    sdp_blocks: List[str] = []
-    last_codec: Optional[str] = None
-    seen_numbers = set()
+        dir_ = _direction(module, body)
+        events.append(TimelineEvent(
+            timestamp=ts, direction=dir_, method=method, description=desc
+        ))
+    return events
+
+def _parse_participants(blocks, log: str) -> List[Participant]:
+    """Extract participants from all blocks."""
+    seen: Dict[str, Participant] = {}
 
     for ts, module, body in blocks:
-        method = extract_method(body)
-        direc  = direction(body)
+        first = _first_line(body)
+        # Skip pure internal lines
+        if not any(first.startswith(m) for m in SIP_METHODS) and \
+           not first.startswith('SIP/2.0'):
+            continue
 
-        # ── PGW events ────────────────────────────────────────────────────────
-        for pgw_m in PGW_URL_RE.finditer(body):
-            pgw_events.append(f"[{ts}] pgw/{pgw_m.group(1)}: {pgw_m.group(2)}")
+        ua_m      = UA_RE.search(body)
+        contact_m = CONTACT_IP_RE.search(body)
+        pai_m     = PAI_RE.search(body)
+        from_m    = FROM_RE.search(body)
+        to_m      = TO_RE.search(body)
 
-        # ── Codec negotiation ─────────────────────────────────────────────────
-        codec_m = CODEC_RE.search(body)
-        if codec_m:
-            last_codec = f"{codec_m.group(1)}/{codec_m.group(2)}"
-            timeline.append(TimelineEvent(
-                timestamp=ts, direction="INTERNAL", method="CODEC",
-                description=f"Audio format negotiated: {codec_m.group(2)}",
-                raw=body.strip()[:600]
-            ))
+        ua  = ua_m.group(1).strip()      if ua_m      else None
+        ip  = contact_m.group(1).strip() if contact_m else None
 
-        # ── RTP stats ─────────────────────────────────────────────────────────
-        rtp_m = RTP_STAT_RE.search(body)
-        if rtp_m:
-            from_m = FROM_RE.search(body)
-            leg = from_m.group(1) if from_m else "unknown"
-            rtp_stats.append(RTPStat(
-                leg=leg,
-                ps=rtp_m.group(1), os=rtp_m.group(2),
-                pr=rtp_m.group(3), or_=rtp_m.group(4),
-                pl=rtp_m.group(5), pd=rtp_m.group(6),
-                ji=rtp_m.group(7), codec=last_codec
-            ))
-
-        # ── Anomalies ─────────────────────────────────────────────────────────
-        ssrc_m = SSRC_RE.search(body)
-        if ssrc_m:
-            anomalies.append(f"[{ts}] RTCP SSRC mismatch: received {ssrc_m.group(1)}, expected {ssrc_m.group(2)}")
-
-        if "500 Server Internal Error" in body:
-            w = WARN_RE.search(body)
-            anomalies.append(f"[{ts}] 500 Internal Error: {w.group(1) if w else 'unknown'}")
-
-        if "Network down" in body:
-            t = TRANSPORT_RE.search(body)
-            anomalies.append(f"[{ts}] Network down: {t.group(1) if t else 'transport'}")
-
-        if "rejected_initial_low_quota" in body:
-            s = SESSION_RE.search(body)
-            anomalies.append(f"[{ts}] Online charging rejected (low quota): {s.group(1) if s else ''}")
-
-        # ── Auto-detect participants from SIP messages ────────────────────────
-        if method and "sip" in module:
-            ua_m = UA_RE.search(body)
-            ip_m = CONTACT_IP.search(body)
-            from_m = FROM_RE.search(body)
-            if from_m:
-                num = from_m.group(1)
-                if num not in seen_numbers:
-                    seen_numbers.add(num)
-                    participants.append(Participant(
-                        role="detected",
-                        number=num,
-                        device=ua_m.group(1).strip() if ua_m else None,
-                        ip=ip_m.group(1) if ip_m else None,
-                    ))
-
-        # ── SDP collection ────────────────────────────────────────────────────
-        if "v=0" in body and "m=audio" in body:
-            ua_m = UA_RE.search(body)
-            sdp_blocks.append({"body": body, "ua": ua_m.group(1) if ua_m else "unknown"})
-
-        # ── Timeline ─────────────────────────────────────────────────────────
-        if method and module.split("/")[0] in ("sip", "ucn_vlr", "ucn_pgw", "RegexRoute"):
-            from_m = FROM_RE.search(body)
-            to_m   = TO_RE.search(body)
-            src = f"+{from_m.group(1)}" if from_m else "?"
-            dst = f"+{to_m.group(1)}" if to_m else "?"
-            if method in SIP_METHODS:
-                desc = f"{'→' if direc == 'OUT' else '←'} {method} from {src} to {dst}"
+        for num_m in [from_m, to_m, pai_m]:
+            if not num_m: continue
+            num = num_m.group(1)
+            if len(num) < 7: continue
+            if num not in seen:
+                seen[num] = Participant(number=f"+{num}", device=ua, ip=ip)
             else:
-                desc = f"{method}"
-            timeline.append(TimelineEvent(
-                timestamp=ts, direction=direc, method=method,
-                description=desc, raw=body.strip()[:700]
+                if ua  and not seen[num].device: seen[num].device = ua
+                if ip  and not seen[num].ip:     seen[num].ip     = ip
+
+    return list(seen.values())
+
+def _parse_rtp(blocks, log: str) -> List[RTPStat]:
+    stats = []
+    seen  = set()
+    for ts, module, body in blocks:
+        for m in RTP_RE.finditer(body):
+            key = m.group(0)
+            if key in seen: continue
+            seen.add(key)
+            # Try to identify leg
+            from_m = FROM_RE.search(body)
+            leg = f"+{from_m.group(1)}" if from_m else "unknown"
+            # Try to get codec from nearby format line
+            codec_m = re.search(r'Formats?\s+(?:for\s+\S+\s+)?changed\s+to\s+[\'"]?(\S+)[\'"]?', log)
+            stats.append(RTPStat(
+                leg=leg,
+                ps=m.group(1), os=m.group(2),
+                pr=m.group(3), or_=m.group(4),
+                pl=m.group(5), pd=m.group(6),
+                ji=m.group(7),
+                codec=codec_m.group(1) if codec_m else None
             ))
-        elif module in ("ucn_vlr", "ucn_pgw", "RegexRoute") and not method:
-            timeline.append(TimelineEvent(
-                timestamp=ts, direction="INTERNAL", method=module.upper(),
-                description=body.strip()[:200], raw=body.strip()[:700]
-            ))
+    return stats
 
-    sdp_info = _sdp_summary(sdp_blocks)
-    return dict(timeline=timeline, participants=participants, rtp_stats=rtp_stats,
-                anomalies=anomalies, pgw_events=pgw_events, sdp_info=sdp_info,
-                raw_blocks=blocks)
+def _parse_anomalies(blocks, log: str) -> List[str]:
+    anomalies = []
+    for ts, module, body in blocks:
+        first = _first_line(body)
+        if 'SSRC' in body and 'expecting' in body:
+            anomalies.append(f"[{ts}] RTCP SSRC mismatch: {body[:100]}")
+        if '500 ' in first:
+            anomalies.append(f"[{ts}] Server Internal Error: {first}")
+        if 'Network down' in body:
+            anomalies.append(f"[{ts}] Transport Network down: {body[:100]}")
+        if 'quota' in body.lower() or 'rejected_initial' in body.lower():
+            anomalies.append(f"[{ts}] Charging/quota failure: {body[:120]}")
+        if 'L_Cancel' in body:
+            anomalies.append(f"[{ts}] AuC L_Cancel (auth failure): {body[:100]}")
+    # Retransmissions
+    invite_branches: Dict[str, int] = {}
+    branch_re = re.compile(r'branch=(z9hG4bK\S+)')
+    for ts, module, body in blocks:
+        if _first_line(body).startswith('INVITE'):
+            bm = branch_re.search(body)
+            if bm:
+                b = bm.group(1)
+                invite_branches[b] = invite_branches.get(b, 0) + 1
+    for b, count in invite_branches.items():
+        if count > 1:
+            anomalies.append(f"INVITE retransmitted {count}x for branch {b}")
+    return list(dict.fromkeys(anomalies))
 
+def _parse_pgw(log: str) -> List[str]:
+    events = []
+    pgw_re = re.compile(
+        r'(\d{4}-\d{2}-\d{2}_\d{2}:\d{2}:\d{2}\.\d+).*?'
+        r'pgw/session/(create|delete).*?pgw_session["\s:]+([^,"}\s]+)', re.DOTALL)
+    for m in pgw_re.finditer(log):
+        events.append(f"[{m.group(1)}] PGW session {m.group(2).upper()}: {m.group(3)}")
+    return events
 
-def _sdp_summary(sdp_blocks):
+def _parse_sdp(blocks) -> Dict[str, Any]:
     offered, answered = [], []
-    for entry in sdp_blocks:
-        codecs = re.findall(r"a=rtpmap:\d+ ([^/]+/\d+)", entry["body"])
-        item = {"ua": entry["ua"], "codecs": codecs}
-        if "YATE" in entry["ua"] or "INVITE" in entry["body"][:30]:
-            offered.append(item)
-        else:
-            answered.append(item)
-    return {"offered": offered, "answered": answered}
+    for ts, module, body in blocks:
+        first = _first_line(body)
+        if 'v=0' not in body: continue
+        ua_m = UA_RE.search(body)
+        ua   = ua_m.group(1).strip() if ua_m else 'unknown'
+        codecs = re.findall(r'a=rtpmap:\d+\s+([^\r\n/]+)', body)
+        entry  = {'ua': ua, 'codecs': list(dict.fromkeys(codecs))}
+        if first.startswith('INVITE') or first.startswith('SIP/2.0 183') \
+           or first.startswith('SIP/2.0 180'):
+            offered.append(entry)
+        elif first.startswith('SIP/2.0 200'):
+            answered.append(entry)
+    return {'offered': offered[:2], 'answered': answered[:2]}
+
+def parse_log(log: str) -> Dict[str, Any]:
+    blocks = _extract_blocks(log)
+    return {
+        'timeline':     _parse_timeline(blocks),
+        'participants': _parse_participants(blocks, log),
+        'rtp_stats':    _parse_rtp(blocks, log),
+        'anomalies':    _parse_anomalies(blocks, log),
+        'pgw_events':   _parse_pgw(log),
+        'sdp_info':     _parse_sdp(blocks),
+        'raw_blocks':   blocks,
+    }
 
