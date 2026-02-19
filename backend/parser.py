@@ -144,8 +144,8 @@ def _parse_participants(blocks, log: str) -> List[Participant]:
     return [Participant(**p) for p in seen.values()]
 
 def _parse_rtp(blocks, log: str) -> List[RTPStat]:
-    stats = []
-    seen  = set()
+    stats     = []
+    seen_keys = set()
 
     # Extract codec — strip trailing quotes/spaces
     codec_m = re.search(
@@ -154,31 +154,46 @@ def _parse_rtp(blocks, log: str) -> List[RTPStat]:
     )
     codec = codec_m.group(1).strip("' ") if codec_m else None
 
+    # Collect ALL P-RTP-Stat occurrences with context
+    all_rtp = []
     for ts, module, body in blocks:
         for m in RTP_RE.finditer(body):
-            # Deduplicate by stats values
-            key = (m.group(1), m.group(2), m.group(3), m.group(4))
-            if key in seen: continue
-            seen.add(key)
-
-            # Determine leg from From header, normalize number
             from_m = FROM_RE.search(body)
-            if from_m:
-                leg = f"+{_normalize_number(from_m.group(1))}"
-            else:
-                leg = "unknown"
+            to_m   = TO_RE.search(body)
 
-            stats.append(RTPStat(
-                leg=leg,
-                ps=m.group(1),
-                os=m.group(2),
-                pr=m.group(3),
-                or_=m.group(4),
-                pl=m.group(5),
-                pd=m.group(6),
-                ji=m.group(7),
-                codec=codec
-            ))
+            # Use all 7 values as dedup key — catches mirrored legs with diff jitter
+            key = (m.group(1), m.group(2), m.group(3),
+                   m.group(4), m.group(5), m.group(6), m.group(7))
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+
+            all_rtp.append({
+                'ps':   m.group(1), 'os':  m.group(2),
+                'pr':   m.group(3), 'or_': m.group(4),
+                'pl':   m.group(5), 'pd':  m.group(6),
+                'ji':   m.group(7),
+                'from': _normalize_number(from_m.group(1)) if from_m else None,
+                'to':   _normalize_number(to_m.group(1))   if to_m   else None,
+            })
+
+    # Assign leg labels
+    for idx, r in enumerate(all_rtp):
+        if r['from']:
+            leg = f"+{r['from']}"
+        elif r['to']:
+            leg = f"+{r['to']}"
+        else:
+            leg = f"Leg {idx + 1}"
+
+        stats.append(RTPStat(
+            leg=leg,
+            ps=r['ps'],  os=r['os'],
+            pr=r['pr'],  or_=r['or_'],
+            pl=r['pl'],  pd=r['pd'],
+            ji=r['ji'],
+            codec=codec
+        ))
     return stats
 
 def _parse_anomalies(blocks, log: str) -> List[str]:
