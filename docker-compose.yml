@@ -1,20 +1,12 @@
-version: "3.9"
-
 services:
   backend:
     build: ./backend
     container_name: sip-backend
-    ports:
-      - "8001:8001"
-    environment:
-      - PORT=8001
+    network_mode: host
     restart: unless-stopped
 
   frontend:
     build: ./frontend
     container_name: sip-frontend
-    ports:
-      - "3001:80"
-    depends_on:
-      - backend
+    network_mode: host
     restart: unless-stopped
