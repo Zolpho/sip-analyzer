@@ -33,7 +33,7 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
                                            caller_imsi, callee_imsi),
         timeline      = timeline,
         bye_info      = _analyze_bye(req, parsed["raw_blocks"], parsed["anomalies"],
-                                     caller_norm, callee_norm),
+                                     caller_norm, callee_norm, caller_imsi, callee_imsi),
         rtp_stats     = parsed["rtp_stats"],
         anomalies     = parsed["anomalies"],
         call_duration = _timing(timeline)[0],
@@ -118,7 +118,7 @@ def _build_participants(req, detected, caller_norm, callee_norm,
 
     return result
 
-def _analyze_bye(req, raw_blocks, anomalies, caller_norm, callee_norm):
+def _analyze_bye(req, raw_blocks, anomalies, caller_norm, callee_norm, caller_imsi='', callee_imsi=''):
     bye_block = None
     for ts, module, body in raw_blocks:
         first = body.strip().splitlines()[0].strip() if body.strip() else ""
