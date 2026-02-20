@@ -213,16 +213,57 @@ def _parse_anomalies(blocks, log: str) -> List[str]:
             anomalies.append(f"[{ts}] {first[:80]}")
         if 'Network down' in body:
             anomalies.append(f"[{ts}] Transport Network down")
-        if 'quota' in body.lower() or 'rejected_initial' in body.lower():
-            # Extract IMSI or session ID from PGW log line
-            imsi_m = re.search(r'(\d{15,})', body)
-            sess_m = re.search(r"['\"]?([^'\":\s]+(?:chili|ims|internet)[^'\":\s]*)['\"]?", body)
-            detail = ''
-            if sess_m:
-                detail = f" — session: {sess_m.group(1)}"
-            elif imsi_m:
-                detail = f" — IMSI: {imsi_m.group(1)}"
+                if 'quota' in body.lower() or 'rejected_initial' in body.lower():
+            detail_parts = []
+
+            # Extract IMSI from XML Diameter data
+            imsi_m = re.search(
+                r'<SubscriptionIdType>imsi</SubscriptionIdType>\s*'
+                r'<SubscriptionIdData>(\d+)</SubscriptionIdData>',
+                body, re.IGNORECASE
+            )
+            # Extract MSISDN/E164 from XML Diameter data
+            e164_m = re.search(
+                r'<SubscriptionIdType>e164</SubscriptionIdType>\s*'
+                r'<SubscriptionIdData>(\d+)</SubscriptionIdData>',
+                body, re.IGNORECASE
+            )
+            # Extract request type (initial/update/termination)
+            reqtype_m = re.search(
+                r'<CcRequestType>(\w+)</CcRequestType>',
+                body, re.IGNORECASE
+            )
+            # Extract service context (32251=data, 32276=voice/SMS)
+            svc_m = re.search(
+                r'<ServiceContextId>(\d+)@',
+                body, re.IGNORECASE
+            )
+            # Fallback: plain IMSI from pgw session line
+            if not imsi_m:
+                plain_m = re.search(r'pgw_session["\s:]+(\d{15})', body)
+                if plain_m:
+                    detail_parts.append(f"IMSI: {plain_m.group(1)}")
+            else:
+                detail_parts.append(f"IMSI: {imsi_m.group(1)}")
+
+            if e164_m:
+                detail_parts.append(f"MSISDN: +{e164_m.group(1)}")
+
+            if reqtype_m:
+                detail_parts.append(f"type: {reqtype_m.group(1)}")
+
+            if svc_m:
+                svc_map = {
+                    '32251': 'data',
+                    '32276': 'voice/SMS',
+                    '32274': 'MMS',
+                }
+                svc_code = svc_m.group(1)
+                detail_parts.append(f"service: {svc_map.get(svc_code, svc_code)}")
+
+            detail = (' — ' + ' | '.join(detail_parts)) if detail_parts else ''
             anomalies.append(f"[{ts}] Charging/quota failure{detail}")
+
         if 'L_Cancel' in body:
             anomalies.append(f"[{ts}] AuC L_Cancel (auth failure)")
         if first.startswith('INVITE'):
