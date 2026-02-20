@@ -306,6 +306,120 @@ def _parse_sdp(blocks) -> Dict[str, Any]:
             answered.append(entry)
     return {'offered': offered[:2], 'answered': answered[:2]}
 
+def _parse_data_usage(log: str) -> List[Dict]:
+    """Parse Diameter CCR termination messages to build per-session data usage."""
+    sessions = {}
+
+    # Match each timestamped block containing CreditControlRequest/Answer
+    block_re = re.compile(
+        r'(\d{4}-\d{2}-\d{2}_\d{2}:\d{2}:\d{2}\.\d+).*?'
+        r'(CreditControlRequest|CreditControlAnswer)(.*?)'
+        r'(?=\d{4}-\d{2}-\d{2}_\d{2}:\d{2}:\d{2}|\Z)',
+        re.DOTALL
+    )
+
+    for m in block_re.finditer(log):
+        ts   = m.group(1)
+        kind = m.group(2)
+        body = m.group(3)
+
+        # Extract session ID as unique key
+        sess_m = re.search(r'SessionId[^>]*?([a-z0-9.]+\d{10,}[a-z0-9.]*)', body, re.IGNORECASE)
+        if not sess_m: continue
+        sess_id = sess_m.group(1)
+
+        # Extract identifiers
+        imsi_m   = re.search(r'SubscriptionIdTypeimsiSubscriptionIdType\s*SubscriptionIdData(\d+)', body)
+        e164_m   = re.search(r'SubscriptionIdTypee164SubscriptionIdType\s*SubscriptionIdData(\d+)', body)
+        apn_m    = re.search(r'CalledStationId([a-zA-Z0-9._-]+)CalledStationId', body)
+        ip_m     = re.search(r'PDPAddress[^>]*?([\d.]+)PDPAddress', body)
+        reqtype_m= re.search(r'CcRequestType(\w+)CcRequestType', body)
+        svc_m    = re.search(r'ServiceContextId(\d+)@', body)
+
+        imsi    = imsi_m.group(1)    if imsi_m    else None
+        msisdn  = e164_m.group(1)    if e164_m    else None
+        apn     = apn_m.group(1)     if apn_m     else None
+        ip      = ip_m.group(1)      if ip_m      else None
+        reqtype = reqtype_m.group(1) if reqtype_m else None
+        svc_code= svc_m.group(1)     if svc_m     else None
+
+        svc_map = {'32251': 'data', '32276': 'voice/SMS', '32274': 'MMS'}
+        service = svc_map.get(svc_code, svc_code) if svc_code else None
+
+        # Init session record
+        if sess_id not in sessions:
+            sessions[sess_id] = {
+                'session_id': sess_id,
+                'imsi':       imsi,
+                'msisdn':     f"+{msisdn}" if msisdn else None,
+                'apn':        apn,
+                'ip':         ip,
+                'service':    service,
+                'start_ts':   ts,
+                'end_ts':     None,
+                'in_bytes':   0,
+                'out_bytes':  0,
+                'total_bytes':0,
+                'req_count':  0,
+                'status':     'active',
+            }
+        else:
+            # Update fields if newly found
+            rec = sessions[sess_id]
+            if imsi   and not rec['imsi']:   rec['imsi']   = imsi
+            if msisdn and not rec['msisdn']: rec['msisdn'] = f"+{msisdn}"
+            if apn    and not rec['apn']:    rec['apn']    = apn
+            if ip     and not rec['ip']:     rec['ip']     = ip
+            if service and not rec['service']: rec['service'] = service
+
+        # Accumulate usage from UsedServiceUnit blocks
+        for in_b  in re.findall(r'CcInputOctets(\d+)CcInputOctets',  body):
+            sessions[sess_id]['in_bytes']  += int(in_b)
+        for out_b in re.findall(r'CcOutputOctets(\d+)CcOutputOctets', body):
+            sessions[sess_id]['out_bytes'] += int(out_b)
+        for tot_b in re.findall(r'CcTotalOctets(\d+)CcTotalOctets',   body):
+            sessions[sess_id]['total_bytes'] += int(tot_b)
+
+        # Also accumulate voice time
+        for cc_t in re.findall(r'CcTime(\d+)CcTime', body):
+            sessions[sess_id].setdefault('voice_sec', 0)
+            sessions[sess_id]['voice_sec'] += int(cc_t)
+
+        sessions[sess_id]['req_count'] += 1
+
+        # Mark termination
+        if reqtype in ('termination', 'terminate'):
+            sessions[sess_id]['end_ts']  = ts
+            sessions[sess_id]['status']  = 'terminated'
+
+    # Deduplicate and clean up — remove 0-usage duplicates per IMSI/APN
+    result = []
+    seen   = set()
+    for s in sessions.values():
+        key = (s.get('imsi'), s.get('apn'), s.get('start_ts', '')[:16])
+        if key in seen: continue
+        seen.add(key)
+
+        # Format bytes human-readable
+        def fmt_bytes(n):
+            if n == 0: return '0 B'
+            for unit in ['B','KB','MB','GB']:
+                if n < 1024: return f"{n:.1f} {unit}"
+                n /= 1024
+            return f"{n:.1f} TB"
+
+        s['in_bytes_fmt']    = fmt_bytes(s['in_bytes'])
+        s['out_bytes_fmt']   = fmt_bytes(s['out_bytes'])
+        s['total_bytes_fmt'] = fmt_bytes(s['total_bytes'])
+        s['voice_sec_fmt']   = f"{s.get('voice_sec',0)}s" \
+                               if s.get('voice_sec') else None
+        result.append(s)
+
+    # Sort by start time
+    result.sort(key=lambda x: x.get('start_ts',''))
+    return result
+
+
 def parse_log(log: str) -> Dict[str, Any]:
     blocks = _extract_blocks(log)
     return {
@@ -315,5 +429,6 @@ def parse_log(log: str) -> Dict[str, Any]:
         'anomalies':    _parse_anomalies(blocks, log),
         'pgw_events':   _parse_pgw(log),
         'sdp_info':     _parse_sdp(blocks),
+        'data_usage':   _parse_data_usage(log),
         'raw_blocks':   blocks,
     }

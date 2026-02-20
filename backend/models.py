@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 
 class AnalyzeRequest(BaseModel):
     caller: Optional[str] = None
@@ -52,5 +52,6 @@ class AnalyzeResponse(BaseModel):
     ring_time: Optional[str] = None
     sdp_info: Optional[dict] = None
     pgw_events: Optional[List[str]] = None
+    data_usage: Optional[List[Dict]] = None
     routing_info: Optional[List[str]] = None
 
