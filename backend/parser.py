@@ -223,9 +223,6 @@ def _parse_anomalies(blocks, log: str) -> List[str]:
             elif imsi_m:
                 detail = f" — IMSI: {imsi_m.group(1)}"
             anomalies.append(f"[{ts}] Charging/quota failure{detail}")
-
-        //if 'quota' in body.lower() or 'rejected_initial' in body.lower():
-        //    anomalies.append(f"[{ts}] Charging/quota failure")
         if 'L_Cancel' in body:
             anomalies.append(f"[{ts}] AuC L_Cancel (auth failure)")
         if first.startswith('INVITE'):
