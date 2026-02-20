@@ -9,9 +9,10 @@ import Anomalies    from "./components/Anomalies";
 import RawLogViewer from "./components/RawLogViewer";
 import ExportBar    from "./components/ExportBar";
 import ThemeToggle  from "./components/ThemeToggle";
+import DataUsage    from "./components/DataUsage";
 
 const API  = import.meta.env.VITE_API_URL || "";
-const TABS = ["Timeline","Participants","BYE Analysis","RTP Stats","Anomalies","Raw Log"];
+const TABS = ["Timeline","Participants","BYE Analysis","RTP Stats","Anomalies","Data Usage","Raw Log"];
 
 export default function App() {
   const [dark, setDark] = useState(() => window.matchMedia("(prefers-color-scheme: dark)").matches);
@@ -44,8 +45,10 @@ export default function App() {
 
   const badgeCount = (t) => {
     if (!result) return null;
-    const map = { Timeline: result.timeline?.length, Anomalies: result.anomalies?.length,
-                  Participants: result.participants?.length, "RTP Stats": result.rtp_stats?.length };
+        const map = { Timeline: result.timeline?.length, Anomalies: result.anomalies?.length,
+                  Participants: result.participants?.length, "RTP Stats": result.rtp_stats?.length,
+                  "Data Usage": result.data_usage?.length };
+
     return map[t] ?? null;
   };
 
@@ -111,6 +114,7 @@ export default function App() {
               {tab === "BYE Analysis" && <ByeAnalysis  data={result.bye_info} />}
               {tab === "RTP Stats"    && <RTPStats      data={result.rtp_stats} sdp={result.sdp_info} />}
               {tab === "Anomalies"    && <Anomalies     data={result.anomalies} />}
+              {tab === "Data Usage"   && <DataUsage     data={result.data_usage} />}
               {tab === "Raw Log"      && <RawLogViewer  log={form.log} />}
             </div>
           </div>

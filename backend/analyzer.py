@@ -40,6 +40,7 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
         answer_time   = _timing(timeline)[1],
         ring_time     = _timing(timeline)[2],
         sdp_info      = parsed["sdp_info"]   if "+sdp"     in flags or full else None,
+        data_usage    = parsed["data_usage"] if "+pgw"     in flags or full else None,
         pgw_events    = parsed["pgw_events"] if "+pgw"     in flags or full else None,
         routing_info  = _routing(parsed["raw_blocks"]) if "+routing" in flags or full else None,
     )
