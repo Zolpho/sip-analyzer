@@ -204,22 +204,49 @@ def _analyze_bye(req, raw_blocks, anomalies, caller_norm, callee_norm, caller_im
 
 def _timing(timeline):
     invite_ts = answer_ts = ring_ts = bye_ts = None
+
+    # Find the Call-ID of the first INVITE to anchor all subsequent events
+    anchor_callid = None
+    for ev in timeline:
+        if ev.method == "INVITE":
+            # Extract Call-ID from description
+            cid_m = re.search(r'Call-ID:\s*(\S+)', ev.description)
+            if cid_m:
+                anchor_callid = cid_m.group(1)
+            invite_ts = _ts(ev.timestamp)
+            break
+
     for ev in timeline:
         t = _ts(ev.timestamp)
         if not t: continue
-        if ev.method == "INVITE"        and invite_ts is None: invite_ts = t
-        if "180" in ev.method           and ring_ts   is None: ring_ts   = t
-        if ev.method.startswith("200")  and "INVITE" in ev.description \
-                                        and answer_ts is None: answer_ts = t
-        if ev.method == "BYE"           and bye_ts    is None: bye_ts    = t
+
+        # If we have an anchor Call-ID, skip events from other calls
+        if anchor_callid:
+            cid_m = re.search(r'Call-ID:\s*(\S+)', ev.description)
+            if cid_m and cid_m.group(1) != anchor_callid:
+                continue
+
+        if ev.method == "INVITE" and invite_ts is None:
+            invite_ts = t
+        if "180" in ev.method and ring_ts is None:
+            ring_ts = t
+        if ev.method.startswith("200") and "INVITE" in ev.description \
+                and answer_ts is None:
+            answer_ts = t
+        if ev.method == "BYE" and bye_ts is None:
+            bye_ts = t
+
     def fmt(d):
         if d is None: return None
         s = d.total_seconds()
+        # Sanity check — reject implausible values over 1 hour
+        if s > 3600: return None
         return f"{int(s//60)}m {s%60:.1f}s" if s >= 60 else f"{s:.1f}s"
+
     return (
-        fmt((bye_ts - answer_ts)  if bye_ts and answer_ts  else None),
+        fmt((bye_ts - answer_ts)   if bye_ts and answer_ts   else None),
         fmt((answer_ts - invite_ts) if answer_ts and invite_ts else None),
-        fmt((ring_ts - invite_ts)  if ring_ts and invite_ts  else None),
+        fmt((ring_ts - invite_ts)   if ring_ts and invite_ts  else None),
     )
 
 def _routing(raw_blocks):
