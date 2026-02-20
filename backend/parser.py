@@ -213,7 +213,7 @@ def _parse_anomalies(blocks, log: str) -> List[str]:
             anomalies.append(f"[{ts}] {first[:80]}")
         if 'Network down' in body:
             anomalies.append(f"[{ts}] Transport Network down")
-                if 'quota' in body.lower() or 'rejected_initial' in body.lower():
+        if 'quota' in body.lower() or 'rejected_initial' in body.lower():
             detail_parts = []
 
             # Extract IMSI from XML Diameter data
