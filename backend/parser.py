@@ -214,7 +214,18 @@ def _parse_anomalies(blocks, log: str) -> List[str]:
         if 'Network down' in body:
             anomalies.append(f"[{ts}] Transport Network down")
         if 'quota' in body.lower() or 'rejected_initial' in body.lower():
-            anomalies.append(f"[{ts}] Charging/quota failure")
+            # Extract IMSI or session ID from PGW log line
+            imsi_m = re.search(r'(\d{15,})', body)
+            sess_m = re.search(r"['\"]?([^'\":\s]+(?:chili|ims|internet)[^'\":\s]*)['\"]?", body)
+            detail = ''
+            if sess_m:
+                detail = f" — session: {sess_m.group(1)}"
+            elif imsi_m:
+                detail = f" — IMSI: {imsi_m.group(1)}"
+            anomalies.append(f"[{ts}] Charging/quota failure{detail}")
+
+        //if 'quota' in body.lower() or 'rejected_initial' in body.lower():
+        //    anomalies.append(f"[{ts}] Charging/quota failure")
         if 'L_Cancel' in body:
             anomalies.append(f"[{ts}] AuC L_Cancel (auth failure)")
         if first.startswith('INVITE'):
