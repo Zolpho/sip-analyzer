@@ -10,7 +10,7 @@ cp .env.example frontend/.env
 docker-compose up --build -d
 ```
 
-Open: http://<vm-ip>:3001
+Open: http://vm-ip:3001
 
 ## Ports
 - Frontend: 3001
