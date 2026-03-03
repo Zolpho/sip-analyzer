@@ -20,6 +20,8 @@
 .method-500      { @apply bg-red-200 text-red-900 dark:bg-red-800 dark:text-red-100; }
 .method-CODEC    { @apply bg-indigo-100 text-indigo-800 dark:bg-indigo-900 dark:text-indigo-200; }
 .method-INTERNAL { @apply bg-gray-100 text-gray-400 dark:bg-gray-800 dark:text-gray-500; }
+.method-ROUTE-OK   { @apply bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200; }
+.method-ROUTE-FAIL { @apply bg-red-200 text-red-900 dark:bg-red-800 dark:text-red-100; }
 
 .dir-IN       { @apply text-green-600 dark:text-green-400 font-bold; }
 .dir-OUT      { @apply text-blue-600 dark:text-blue-400 font-bold; }

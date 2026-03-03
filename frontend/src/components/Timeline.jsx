@@ -2,6 +2,7 @@ const METHOD_COLOR = {
   INVITE: "method-INVITE", BYE: "method-BYE", CANCEL: "method-CANCEL",
   REGISTER: "method-REGISTER", PRACK: "method-PRACK", NOTIFY: "method-NOTIFY",
   CODEC: "method-CODEC", INTERNAL: "method-INTERNAL",
+  "ROUTE/OK": "method-ROUTE-OK",
 };
 const getMethodClass = (m) => {
   if (m.startsWith("200")) return "method-200";
@@ -9,6 +10,7 @@ const getMethodClass = (m) => {
   if (m.startsWith("183")) return "method-183";
   if (m.startsWith("100")) return "method-100";
   if (m.startsWith("5"))   return "method-500";
+  if (m.startsWith("ROUTE/FAIL")) return "method-ROUTE-FAIL"; 
   return METHOD_COLOR[m] || "method-INTERNAL";
 };
 
