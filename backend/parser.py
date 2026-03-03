@@ -205,23 +205,27 @@ def _parse_timeline(blocks) -> List[TimelineEvent]:
             if m2:
                 method = f"{m2.group(1)} {m2.group(2)[:30]}"
 
-        # Diameter — check first line and first 120 chars of body
+                # Diameter — check first line and first 120 chars of body
         if method is None:
             dm = DIAMETER_RE.search(first) or DIAMETER_RE.search(body[:120])
             if dm:
                 method      = dm.group(1)
                 is_diameter = True
+
+        # YATE engine message (call.route, call.execute, etc.)
         if method is None:
             yate_m = re.search(r"Returned\s+(?:true|false)\s+'([^']+)'", first)
-        if yate_m:
-            msg = yate_m.group(1)
-            if 'call.route' in msg:
-                err_m = re.search(r"param\['error'\]\s*=\s*'([^']+)'", body)
-                method = f"ROUTE/FAIL:{err_m.group(1)}" if err_m else 'ROUTE/OK'
-            else:
-                method = msg.upper().replace('.', '/')
-        #if method is None:
-        #    method = 'INTERNAL'
+            if yate_m:                          # ← nested inside, safe
+                msg = yate_m.group(1)
+                if 'call.route' in msg:
+                    err_m = re.search(r"param\['error'\]\s*=\s*'([^']+)'", body)
+                    method = f"ROUTE/FAIL:{err_m.group(1)}" if err_m else 'ROUTE/OK'
+                else:
+                    method = msg.upper().replace('.', '/')
+
+        # Final fallback — must never be commented out
+        if method is None:
+            method = 'INTERNAL'
 
         # ── Build description ─────────────────────────────────────────────────
         desc_parts = []
