@@ -193,15 +193,15 @@ def _parse_timeline(blocks) -> List[TimelineEvent]:
         method      = None
         is_diameter = False
 
-        # SIP request
+        # SIP request — search full body (method line is after '-----' separator)
         for m in SIP_METHODS:
-            if re.match(rf'^{m}\s+', first):
+            if re.search(rf'^{m}\s+', body, re.MULTILINE):
                 method = m
                 break
 
-        # SIP response
+        # SIP response — same, search full body
         if method is None:
-            m2 = re.match(r'^SIP/2\.0\s+(\d{3})\s+(.+)$', first)
+            m2 = re.search(r'^SIP/2\.0\s+(\d{3})\s+(.+)$', body, re.MULTILINE)
             if m2:
                 method = f"{m2.group(1)} {m2.group(2)[:30]}"
 
@@ -317,15 +317,14 @@ def _parse_timeline(blocks) -> List[TimelineEvent]:
         ))
     return events
 
-
 def _parse_participants(blocks, log: str) -> List[Participant]:
     seen: Dict[str, Dict] = {}
 
     for ts, module, body in blocks:
-        first = _first_line(body)
-        has_sip_params = ("param['caller']" in body or "param['sip_from']" in body)
-        if not any(first.startswith(m) for m in SIP_METHODS) and \
-           not first.startswith('SIP/2.0') and not has_sip_params:
+        # ← fix: search full body instead of first line
+        has_sip = any(re.search(rf'^{m}\s+', body, re.MULTILINE) for m in SIP_METHODS) \
+                  or re.search(r'^SIP/2\.0\s+', body, re.MULTILINE)
+        if not has_sip:
             continue
 
         ua_m      = UA_RE.search(body)
@@ -336,29 +335,34 @@ def _parse_participants(blocks, log: str) -> List[Participant]:
 
         ua_raw = ua_m.group(1).strip() if ua_m else None
         ip     = contact_m.group(1).strip() if contact_m else None
+        ua     = None if (ua_raw and 'YATE' in ua_raw) else ua_raw
 
-        # Skip YATE — it's the proxy, not an endpoint
-        ua = None if (ua_raw and 'YATE' in ua_raw) else ua_raw
+        # Extract IMSI from SIP URI (15-digit number before @ims.)
+        imsi_m = re.search(r'sip:(\d{15})@ims\.', body)
+        imsi   = imsi_m.group(1) if imsi_m else None
+
+        # Also try to get IP from transport line if Contact didn't have it
+        if not ip:
+            tp_m = re.search(r"received \d+ bytes.*?from ([\d.]+):\d+", body)
+            if tp_m:
+                ip = tp_m.group(1)
 
         for num_m in [from_m, to_m, pai_m]:
             if not num_m: continue
             num = num_m.group(1)
-            if len(num) < 7: continue
-            # Skip IMSI-style long numbers
-            if len(num) > 15: continue
+            if len(num) < 7 or len(num) > 15: continue
             norm = _normalize_number(num)
             if norm not in seen:
-                seen[norm] = {
-                                        'number': f"+{norm}",
-                    'device': ua,
-                    'ip':     ip,
-                    'role':   'Unknown'
-                }
+                seen[norm] = {'number': f"+{norm}", 'device': ua,
+                              'ip': ip, 'imsi': imsi, 'role': 'Unknown'}
             else:
-                if ua and not seen[norm]['device']: seen[norm]['device'] = ua
-                if ip and not seen[norm]['ip']:     seen[norm]['ip']     = ip
+                rec = seen[norm]
+                if ua    and not rec['device']: rec['device'] = ua
+                if ip    and not rec['ip']:     rec['ip']     = ip
+                if imsi  and not rec['imsi']:   rec['imsi']   = imsi
 
     return [Participant(**p) for p in seen.values()]
+
 
 def _parse_rtp(blocks, log: str) -> List[RTPStat]:
     stats     = []
@@ -648,30 +652,25 @@ def parse_log(log: str) -> Dict[str, Any]:
     }
 def _parse_bye(blocks) -> 'ByeInfo | None':
     for ts, module, body in blocks:
-        first = _first_line(body)
-        if not first.startswith('BYE'):
+        # ← was: first = _first_line(body) + if not first.startswith('BYE')
+        if not re.search(r'^BYE\s+', body, re.MULTILINE):
             continue
 
-        # Sender UA
-        ua_m = UA_RE.search(body)
-        sender = ua_m.group(1).strip() if ua_m else module
+        ua_m      = UA_RE.search(body)
+        sender    = ua_m.group(1).strip() if ua_m else module
 
-        # Sender number — from From: header
-        from_m = FROM_RE.search(body)
-        sender_number = f"+{_normalize_number(from_m.group(1))}" if from_m else None
+        from_m         = FROM_RE.search(body)
+        sender_number  = f"+{_normalize_number(from_m.group(1))}" if from_m else None
 
-        # Reason header
-        reason_m = REASON_RE.search(body)
-        reason = reason_m.group(1).strip() if reason_m else None
+        reason_m  = REASON_RE.search(body)
+        reason    = reason_m.group(1).strip() if reason_m else None
 
-        # Evidence lines
-        evidence = []
+        evidence  = []
         if reason:
             evidence.append(f"Reason: {reason}")
         rtp_m = RTP_RE.search(body)
         if rtp_m:
-            pl = rtp_m.group(5)
-            evidence.append(f"P-RTP-Stat: PS={rtp_m.group(1)} PR={rtp_m.group(3)} PL={pl}")
+            evidence.append(f"P-RTP-Stat: PS={rtp_m.group(1)} PR={rtp_m.group(3)} PL={rtp_m.group(5)}")
         cid = re.search(r'[Cc]all-[Ii][Dd]:\s*(\S+)', body)
         if cid:
             evidence.append(f"Call-ID: {cid.group(1)}")

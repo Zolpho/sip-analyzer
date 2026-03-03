@@ -34,7 +34,7 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
         timeline      = timeline,
         bye_info      = _analyze_bye(req, parsed["raw_blocks"], parsed["anomalies"],
                                      caller_norm, callee_norm, caller_imsi, callee_imsi),
-        rtp_stats     = parsed["rtp_stats"],
+        rtp_stats     = _filter_rtp(parsed["rtp_stats"], caller_norm, callee_norm),
         anomalies     = parsed["anomalies"],
         call_duration = _timing(timeline)[0],
         answer_time   = _timing(timeline)[1],
@@ -70,6 +70,14 @@ def _filter_timeline(timeline: List[TimelineEvent], relevant: set) -> List[Timel
                 filtered.append(ev)
                 break
     return filtered
+
+def _filter_rtp(rtp_stats, caller_norm, callee_norm):
+    if not caller_norm and not callee_norm:
+        return rtp_stats
+    relevant = set()
+    if caller_norm: relevant.add(f"+{caller_norm}")
+    if callee_norm: relevant.add(f"+{callee_norm}")
+    return [r for r in rtp_stats if r.leg in relevant]
 
 def _build_participants(req, detected, caller_norm, callee_norm,
                         caller_imsi, callee_imsi) -> List[Participant]:
@@ -122,20 +130,19 @@ def _build_participants(req, detected, caller_norm, callee_norm,
 def _analyze_bye(req, raw_blocks, anomalies, caller_norm, callee_norm, caller_imsi='', callee_imsi=''):
     bye_block = None
     for ts, module, body in raw_blocks:
-        first = body.strip().splitlines()[0].strip() if body.strip() else ""
-        # Find BYE relevant to our call participants
-        if re.match(r'^BYE\s+', first):
-            # If we have caller/callee, verify this BYE belongs to our call
-            if caller_norm or callee_norm:
-                if (caller_norm and caller_norm in body) or \
-                   (callee_norm and callee_norm in body):
-                    bye_block = (ts, body)
-                    break
-            else:
+        if not re.search(r'^BYE\s+', body, re.MULTILINE):
+            continue
+        # If we have caller/callee, verify this BYE belongs to our call
+        if caller_norm or callee_norm:
+            if (caller_norm and caller_norm in body) or \
+               (callee_norm and callee_norm in body):
                 bye_block = (ts, body)
                 break
+        else:
+            bye_block = (ts, body)
+            break
 
-    if not bye_block: return None
+    if not bye_block: return None    
     ts, body   = bye_block
     from_m     = FROM_RE.search(body)
     reason_m   = REASON_RE.search(body)
