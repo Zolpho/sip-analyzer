@@ -1,6 +1,6 @@
 import re
 from typing import List, Dict, Any
-from models import TimelineEvent, Participant, RTPStat
+from models import TimelineEvent, Participant, RTPStat, ByeInfo
 
 # ── Core regex patterns ──────────────────────────────────────────────────────
 TS_RE         = re.compile(r'(\d{4}-\d{2}-\d{2}_\d{2}:\d{2}:\d{2}\.\d+)')
@@ -643,6 +643,45 @@ def parse_log(log: str) -> Dict[str, Any]:
         'pgw_events':   _parse_pgw(log),
         'sdp_info':     _parse_sdp(blocks),
         'data_usage':   _parse_data_usage(log),
+        'bye_info':     _parse_bye(blocks),
         'raw_blocks':   blocks,
     }
+def _parse_bye(blocks) -> 'ByeInfo | None':
+    for ts, module, body in blocks:
+        first = _first_line(body)
+        if not first.startswith('BYE'):
+            continue
+
+        # Sender UA
+        ua_m = UA_RE.search(body)
+        sender = ua_m.group(1).strip() if ua_m else module
+
+        # Sender number — from From: header
+        from_m = FROM_RE.search(body)
+        sender_number = f"+{_normalize_number(from_m.group(1))}" if from_m else None
+
+        # Reason header
+        reason_m = REASON_RE.search(body)
+        reason = reason_m.group(1).strip() if reason_m else None
+
+        # Evidence lines
+        evidence = []
+        if reason:
+            evidence.append(f"Reason: {reason}")
+        rtp_m = RTP_RE.search(body)
+        if rtp_m:
+            pl = rtp_m.group(5)
+            evidence.append(f"P-RTP-Stat: PS={rtp_m.group(1)} PR={rtp_m.group(3)} PL={pl}")
+        cid = re.search(r'[Cc]all-[Ii][Dd]:\s*(\S+)', body)
+        if cid:
+            evidence.append(f"Call-ID: {cid.group(1)}")
+
+        return ByeInfo(
+            sender=sender,
+            sender_number=sender_number,
+            reason=reason,
+            raw_snippet=body[:300],
+            evidence=evidence,
+        )
+    return None
 
