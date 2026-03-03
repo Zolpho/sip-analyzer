@@ -5,16 +5,37 @@ from models import TimelineEvent, Participant, RTPStat
 # ── Core regex patterns ──────────────────────────────────────────────────────
 TS_RE         = re.compile(r'(\d{4}-\d{2}-\d{2}_\d{2}:\d{2}:\d{2}\.\d+)')
 MODULE_RE     = re.compile(r'<([^>]+)>')
-FROM_RE       = re.compile(r'[Ff]rom:\s*<?(?:sip:|tel:)?\+?(\d+)', re.MULTILINE)
-TO_RE         = re.compile(r'[Tt]o:\s*<?(?:sip:|tel:)?\+?(\d+)',   re.MULTILINE)
-UA_RE         = re.compile(r'[Uu]ser-[Aa]gent:\s*([^\r\n,;]+)',     re.MULTILINE)
+#FROM_RE       = re.compile(r'[Ff]rom:\s*<?(?:sip:|tel:)?\+?(\d+)', re.MULTILINE)
+#TO_RE         = re.compile(r'[Tt]o:\s*<?(?:sip:|tel:)?\+?(\d+)',   re.MULTILINE)
+#UA_RE         = re.compile(r'[Uu]ser-[Aa]gent:\s*([^\r\n,;]+)',     re.MULTILINE)
 REASON_RE     = re.compile(r'[Rr]eason:\s*([^\r\n]+)',               re.MULTILINE)
 RTP_RE        = re.compile(
     r'P-RTP-Stat:\s*PS=?(\d+),OS=?(\d+),PR=?(\d+),OR=?(\d+),PL=?(\d+),PD=?(\d+),JI=?(\d+)',
     re.IGNORECASE
 )
-CONTACT_IP_RE = re.compile(r'[Cc]ontact:\s*<?sip:[^@]+@([\d.]+):?(\d*)', re.MULTILINE)
-PAI_RE        = re.compile(r'[Pp]-[Aa]sserted-[Ii]dentity:\s*<?(?:sip:|tel:)?\+?(\d+)', re.MULTILINE)
+#CONTACT_IP_RE = re.compile(r'[Cc]ontact:\s*<?sip:[^@]+@([\d.]+):?(\d*)', re.MULTILINE)
+#PAI_RE        = re.compile(r'[Pp]-[Aa]sserted-[Ii]dentity:\s*<?(?:sip:|tel:)?\+?(\d+)', re.MULTILINE)
+FROM_RE = re.compile(
+    r"(?:[Ff]rom:\s*<?(?:sip:|tel:)?\+?|param\['(?:caller|sip_from)'\]\s*=\s*'<?(?:sip:|tel:)?\+?)"
+    r'(\d+)', re.MULTILINE
+)
+TO_RE = re.compile(
+    r"(?:[Tt]o:\s*<?(?:sip:|tel:)?\+?|param\['(?:called|sip_to)'\]\s*=\s*'<?(?:sip:|tel:)?\+?)"
+    r'(\d+)', re.MULTILINE
+)
+UA_RE = re.compile(
+    r"(?:[Uu]ser-[Aa]gent:\s*|param\['(?:sip_user-agent|device)'\]\s*=\s*')"
+    r"([^\r\n,;']+)", re.MULTILINE
+)
+CONTACT_IP_RE = re.compile(
+    r"(?:[Cc]ontact:\s*<?sip:[^@]+@|param\['ip_host'\]\s*=\s*')"
+    r'([\d.a-zA-Z.-]+)', re.MULTILINE
+)
+PAI_RE = re.compile(
+    r"(?:[Pp]-[Aa]sserted-[Ii]dentity:\s*<?(?:sip:|tel:)?\+?|param\['sip_p-asserted-identity'\]\s*=\s*'<?(?:sip:|tel:)?\+?)"
+    r'(\d+)', re.MULTILINE
+)
+
 SIP_METHODS   = ['INVITE','BYE','CANCEL','REGISTER','PRACK','ACK',
                  'NOTIFY','OPTIONS','UPDATE','INFO','MESSAGE','SUBSCRIBE']
 DIAMETER_RE   = re.compile(
@@ -109,11 +130,12 @@ def _is_diam_success(result_str: str, result_code: str) -> bool:
 
 # ── Block splitter ───────────────────────────────────────────────────────────
 BLOCK_RE = re.compile(
-    r'(\d{4}-\d{2}-\d{2}_\d{2}:\d{2}:\d{2}\.\d+)\s+<([^>]+)>[^\n]*\n'
-    r'(?:-----\n)?(.*?)(?=\d{4}-\d{2}-\d{2}_\d{2}:\d{2}:\d{2}\.\d+\s+<|\Z)',
+    r'(\d{4}-\d{2}-\d{2}_\d{2}:\d{2}:\d{2}\.\d+)\s+'
+    r'(?:<([^>]+)>)?\s*'           # <module> is now optional
+    r'([^\n]*)\n'                   # first line (group 3)
+    r'(?:-----\n)?(.*?)(?=\d{4}-\d{2}-\d{2}_\d{2}:\d{2}:\d{2}\.\d+\s+|\Z)',  # lookahead no longer requires <
     re.DOTALL
 )
-
 def _normalize(log: str) -> str:
     """Insert newlines before SIP headers in compressed grep output."""
     return re.sub(
@@ -126,10 +148,17 @@ def _normalize(log: str) -> str:
     )
 
 def _extract_blocks(log: str):
+    # Strip shell prompt and grep '--' separators
+    log = re.sub(r'^\[root@[^\n]*\n', '', log, flags=re.MULTILINE)
+    log = re.sub(r'^\s*--\s*$', '', log, flags=re.MULTILINE)
     log = _normalize(log)
     blocks = []
     for m in BLOCK_RE.finditer(log):
-        ts, module, body = m.group(1), m.group(2), m.group(3).strip()
+        ts     = m.group(1)
+        module = m.group(2) or 'engine'       # None for Format-B → 'engine'
+        first  = (m.group(3) or '').strip()
+        rest   = (m.group(4) or '').strip()
+        body   = (first + '\n' + rest).strip()
         if body:
             blocks.append((ts, module, body))
     return blocks
@@ -182,9 +211,17 @@ def _parse_timeline(blocks) -> List[TimelineEvent]:
             if dm:
                 method      = dm.group(1)
                 is_diameter = True
-
         if method is None:
-            method = 'INTERNAL'
+            yate_m = re.search(r"Returned\s+(?:true|false)\s+'([^']+)'", first)
+        if yate_m:
+            msg = yate_m.group(1)
+            if 'call.route' in msg:
+                err_m = re.search(r"param\['error'\]\s*=\s*'([^']+)'", body)
+                method = f"ROUTE/FAIL:{err_m.group(1)}" if err_m else 'ROUTE/OK'
+            else:
+                method = msg.upper().replace('.', '/')
+        #if method is None:
+        #    method = 'INTERNAL'
 
         # ── Build description ─────────────────────────────────────────────────
         desc_parts = []
@@ -247,7 +284,7 @@ def _parse_timeline(blocks) -> List[TimelineEvent]:
             if to_m:
                 tn = to_m.group(1)
                 desc_parts.append(f"To: {tn}" if len(tn) >= 15 else f"To: +{tn}")
-            cid = re.search(r'[Cc]all-[Ii][Dd]:\s*(\S+)', body)
+            cid = re.search(r"(?:[Cc]all-[Ii][Dd]:\s*|param\['sip_callid'\]\s*=\s*')(\S+?)(?:'|\s|$)", body)
             if cid:
                 desc_parts.append(f"Call-ID: {cid.group(1)[:30]}")
 
@@ -267,8 +304,9 @@ def _parse_participants(blocks, log: str) -> List[Participant]:
 
     for ts, module, body in blocks:
         first = _first_line(body)
+        has_sip_params = ("param['caller']" in body or "param['sip_from']" in body)
         if not any(first.startswith(m) for m in SIP_METHODS) and \
-           not first.startswith('SIP/2.0'):
+           not first.startswith('SIP/2.0') and not has_sip_params:
             continue
 
         ua_m      = UA_RE.search(body)
