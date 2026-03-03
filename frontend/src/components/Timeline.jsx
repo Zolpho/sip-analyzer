@@ -3,6 +3,8 @@ const METHOD_COLOR = {
   REGISTER: "method-REGISTER", PRACK: "method-PRACK", NOTIFY: "method-NOTIFY",
   CODEC: "method-CODEC", INTERNAL: "method-INTERNAL",
   "ROUTE/OK": "method-ROUTE-OK",
+  "REGISTERED":   "method-REGISTERED", 
+  "UNREGISTERED": "method-UNREGISTERED",
 };
 const getMethodClass = (m) => {
   if (m.startsWith("200")) return "method-200";

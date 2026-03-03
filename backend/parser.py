@@ -223,6 +223,12 @@ def _parse_timeline(blocks) -> List[TimelineEvent]:
                 else:
                     method = msg.upper().replace('.', '/')
 
+        # SIP registration events                
+        if method is None:
+            if 'Registered user' in first:
+                method = 'REGISTERED'
+            elif 'Unregistered user' in first:
+                method = 'UNREGISTERED'
         # Final fallback — must never be commented out
         if method is None:
             method = 'INTERNAL'
