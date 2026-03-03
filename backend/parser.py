@@ -294,11 +294,20 @@ def _parse_timeline(blocks) -> List[TimelineEvent]:
 
         desc = " | ".join(desc_parts) if desc_parts else first[:120]
 
+             # ── Color coding ─────────────────────────────────────────────────────
+        if method == 'ROUTE/OK':
+            color = 'green'
+        elif method.startswith('ROUTE/FAIL'):
+            color = 'red'
+        else:
+            color = ''
+
         events.append(TimelineEvent(
             timestamp=ts,
             direction=_direction(body),
             method=method,
-            description=desc
+            description=desc,
+            color=color,
         ))
     return events
 

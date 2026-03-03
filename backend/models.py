@@ -21,6 +21,7 @@ class TimelineEvent(BaseModel):
     direction: str
     method: str
     description: str
+    color: Optional[str] = ''
     raw: Optional[str] = None
 
 class RTPStat(BaseModel):
